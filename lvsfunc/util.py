@@ -1,15 +1,13 @@
 import colorsys
 import random
-import re
 from typing import Any
 
-from vstools import (CustomIndexError, CustomValueError, FrameRangesN,
-                     FuncExceptT, KwargsT, check_variable_resolution, core,
-                     fallback, get_h, get_w, vs)
+from vstools import (CustomIndexError, CustomValueError, Dar, FuncExceptT,
+                     KwargsT, check_variable_resolution, core, fallback, get_h,
+                     get_w, vs)
 
 __all__ = [
     'colored_clips',
-    'convert_rfs',
     'get_match_centers_scaling',
 ]
 
@@ -65,48 +63,11 @@ def colored_clips(
     return [core.std.BlankClip(color=color, **blank_clip_args) for color in rgb_color_list]
 
 
-def convert_rfs(rfs_string: str) -> FrameRangesN:
-    """
-    Convert `ReplaceFramesSimple`-styled ranges to `replace_ranges`-styled ranges.
-
-    This function accepts RFS ranges as a string, consistent with RFS handling.
-    The input string is validated before processing.
-
-    Performance may decrease with a larger number of ranges.
-
-    Supports both '[x y]' and 'x' frame numbering styles.
-    Returns an empty list if no valid frames are found.
-
-    :param rfs_string:          A string representing frame ranges in ReplaceFramesSimple format.
-
-    :return:                    A FrameRangesN list containing frame ranges compatible with `replace_ranges`.
-                                Returns an empty list if no valid frames are found.
-
-    :raises CustomValueError:   If the input string contains invalid characters.
-    """
-
-    rfs_string = str(rfs_string).strip()
-
-    if not rfs_string:
-        return []
-
-    valid_chars = set('0123456789[] ')
-    illegal_chars = set(rfs_string) - valid_chars
-
-    if illegal_chars:
-        reason = ', '.join(f"{c}:{rfs_string.index(c)}" for c in sorted(illegal_chars, key=rfs_string.index))
-        raise CustomValueError('Invalid characters found in input string!', convert_rfs, reason)
-
-    return [
-        int(match[2]) if match[2] else (int(match[0]), int(match[1]))
-        for match in re.findall(r'\[(\d+)\s+(\d+)\]|(\d+)', rfs_string)
-    ]
-
-
 def get_match_centers_scaling(
-    clip: vs.VideoNode,
+    base_dimensions: vs.VideoNode | tuple[int, int] = (1920, 1080),
     target_width: int | None = None,
     target_height: int | None = 720,
+    dar: Dar | None = None,
     func_except: FuncExceptT | None = None
 ) -> KwargsT:
     """
@@ -142,8 +103,8 @@ def get_match_centers_scaling(
 
     The formula for calculating values we can use during desampling is simple:
 
-    * width: clip.width * (target_width - 1) / (clip.width - 1)
-    * height: clip.height * (target_height - 1) / (clip.height - 1)
+    * width: base_width * (target_width - 1) / (base_width - 1)
+    * height: base_height * (target_height - 1) / (base_height - 1)
 
     Example usage:
 
@@ -157,18 +118,23 @@ def get_match_centers_scaling(
     The output is meant to be passed to `vodesfunc.DescaleTarget` as keyword arguments,
     but it may also apply to other functions that require similar parameters.
 
-    :param clip:            The clip to base the calculations on.
-    :param target_width:    Target width for the descale. This should probably be equal to the base width.
-                            If not provided, this value is calculated using the `target_height`.
-                            Default: None.
-    :param target_height:   Target height for the descale. This should probably be equal to the base height.
-                            If not provided, this value is calculated using the `target_width`.
-                            Default: 720.
-    :param func_except:     Function returned for custom error handling.
-                            This should only be set by VS package developers.
+    :param base_dimensions:     The base dimensions to base the calculations on. This may be derived from
+                                a given clip or a tuple of (Width, Height).
+                                Default: (1920, 1080)
+    :param target_width:        Target width for the descale. This should probably be equal to the base width.
+                                If not provided, this value is calculated using the `target_height`.
+                                Default: None.
+    :param target_height:       Target height for the descale. This should probably be equal to the base height.
+                                If not provided, this value is calculated using the `target_width`.
+                                Default: 720.
+    :param dar:                 Display aspect ratio. Used for calculating the width/height if either is None.
+                                This is used for anamorphic sources. If None, derive from `base_dimensions`.
+                                Default: None.
+    :param func_except:         Function returned for custom error handling.
+                                This should only be set by VS package developers.
 
-    :return:                A dictionary with the keys, {width, height, base_width, base_height},
-                            which can be passed directly to `vodesfunc.DescaleTarget` or similar functions.
+    :return:                    A dictionary with the keys, {width, height, base_width, base_height},
+                                which can be passed directly to `vodesfunc.DescaleTarget` or similar functions.
     """
 
     func = fallback(func_except, get_match_centers_scaling)
@@ -180,14 +146,20 @@ def get_match_centers_scaling(
         if target is not None and (not isinstance(target, int) or target <= 0):
             raise CustomValueError(f"`target_{name}` must be a positive integer or None.", func)
 
-    check_variable_resolution(clip, func)
+    if isinstance(base_dimensions, vs.VideoNode):
+        check_variable_resolution(base_dimensions, func)
+
+        base_dimensions = (base_dimensions.width, base_dimensions.height)
+
+    base_width, base_height = base_dimensions
+    dar = dar or Dar.from_size(*base_dimensions)
 
     if target_height is None:
-        target_height = get_h(target_width, clip, 1)
+        target_height = get_h(target_width, dar, 1)
     elif target_width is None:
-        target_width = get_w(target_height, clip, 1)
+        target_width = get_w(target_height, dar, 1)
 
-    width = clip.width * (target_width - 1) / (clip.width - 1)
-    height = clip.height * (target_height - 1) / (clip.height - 1)
+    width = base_width * (target_width - 1) / (base_width - 1)
+    height = base_height * (target_height - 1) / (base_height - 1)
 
     return KwargsT(width=width, height=height, base_width=target_width, base_height=target_height)
